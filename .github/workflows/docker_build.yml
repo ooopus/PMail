@@ -1,9 +1,10 @@
 name: Docker Image CI
 
 on:
-  workflow_dispatch:
-  release:
-    types: [released]
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
 
 env:
   REGISTRY: ghcr.io
