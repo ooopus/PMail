@@ -51,20 +51,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker images
-        uses: docker/build-push-action@v4
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5.5.1
         with:
-          build-args: |
-            VERSION=${{ env.VERSION }}
-            GITHASH=${{ env.GITHASH }}
-          context: .
-          file: ./DockerfileGithubAction
-          platforms: |
-            linux/386
-            linux/amd64
-            linux/arm/v7
-            linux/arm64
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.REPOSITORY_LC }}:${{ env.VERSION }}
-            ${{ env.REGISTRY }}/${{ env.REPOSITORY_LC }}:latest
+            images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          
+      - name: Build and push Docker images
+        uses: docker/build-push-action@v6.7.0
+        with:
+              file: ./Dockerfile
+              tags: ${{ steps.meta.outputs.tags }}
+              labels: ${{ steps.meta.outputs.labels }}
+              push: true
