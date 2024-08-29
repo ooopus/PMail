@@ -1,0 +1,20 @@
+services:
+  pmail:
+    networks:
+      - 1panel-network
+    image: ghcr.io/ooopus/pmail:master
+    volumes:
+      - ./:/work/config
+    restart: always
+    ports:
+      - 25:25
+      - 110:110
+      - 465:465
+      - 995:995
+     ## - 8080:80
+     ## - 80:80
+     ## - 443:443
+  
+networks:
+  1panel-network:
+    external: true
