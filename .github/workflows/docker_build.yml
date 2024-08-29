@@ -16,20 +16,8 @@ jobs:
       contents: read
       packages: write
     steps:
-      - name: Get version
-        id: get_version
-        run: |
-          echo "VERSION=${GITHUB_REF/refs\/tags\//}" >> ${GITHUB_ENV}
-          echo "${GITHUB_REF/refs\/tags\//}"
-          echo "${GITHUB_REF#refs/*/}"
-          echo "${GITHUB_REF}"
+    
       - uses: actions/checkout@v4
-
-      - name: set lower case repository name
-        run: |
-          echo "REPOSITORY_LC=${REPOSITORY,,}" >> ${GITHUB_ENV}
-        env:
-          REPOSITORY: '${{ github.repository }}'
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
