@@ -2,14 +2,18 @@ package parsemail
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"github.com/Jinnrry/pmail/config"
+	"github.com/Jinnrry/pmail/models"
 	"github.com/Jinnrry/pmail/utils/context"
 	"github.com/emersion/go-message"
 	_ "github.com/emersion/go-message/charset"
 	"github.com/emersion/go-message/mail"
 	log "github.com/sirupsen/logrus"
+	"github.com/spf13/cast"
 	"io"
+	"mime"
 	"net/textproto"
 	"regexp"
 	"strings"
@@ -19,6 +23,13 @@ import (
 type User struct {
 	EmailAddress string `json:"EmailAddress"`
 	Name         string `json:"Name"`
+}
+
+func (u User) Build() string {
+	if u.Name != "" {
+		return fmt.Sprintf("\"%s\" <%s>", mime.QEncoding.Encode("utf-8", u.Name), u.EmailAddress)
+	}
+	return fmt.Sprintf("<%s>", u.EmailAddress)
 }
 
 func (u User) GetDomainAccount() (string, string) {
@@ -57,6 +68,64 @@ type Email struct {
 	Size        int
 }
 
+func users2String(users []*User) string {
+	ret := ""
+	for _, user := range users {
+		if ret != "" {
+			ret += ", "
+		}
+		ret += user.Build()
+	}
+	return ret
+}
+
+func (e *Email) BuildTo2String() string {
+	return users2String(e.To)
+}
+
+func (e *Email) BuildCc2String() string {
+	return users2String(e.Cc)
+}
+
+func NewEmailFromModel(d models.Email) *Email {
+
+	var To []*User
+	json.Unmarshal([]byte(d.To), &To)
+
+	var ReplyTo []*User
+	json.Unmarshal([]byte(d.ReplyTo), &ReplyTo)
+
+	var Sender *User
+	json.Unmarshal([]byte(d.Sender), &Sender)
+
+	var Bcc []*User
+	json.Unmarshal([]byte(d.Bcc), &Bcc)
+
+	var Cc []*User
+	json.Unmarshal([]byte(d.Cc), &Cc)
+
+	var Attachments []*Attachment
+	json.Unmarshal([]byte(d.Attachments), &Attachments)
+
+	return &Email{
+		MessageId: cast.ToInt64(d.Id),
+		From: &User{
+			Name:         d.FromName,
+			EmailAddress: d.FromAddress,
+		},
+		To:          To,
+		Subject:     d.Subject,
+		Text:        []byte(d.Text.String),
+		HTML:        []byte(d.Html.String),
+		Sender:      Sender,
+		ReplyTo:     ReplyTo,
+		Bcc:         Bcc,
+		Cc:          Cc,
+		Attachments: Attachments,
+		Date:        d.SendDate.Format("2006-01-02 15:04:05"),
+	}
+}
+
 func NewEmailFromReader(to []string, r io.Reader, size int) *Email {
 	ret := &Email{}
 	m, err := message.Read(r)
@@ -67,10 +136,24 @@ func NewEmailFromReader(to []string, r io.Reader, size int) *Email {
 	ret.Size = size
 	ret.From = buildUser(m.Header.Get("From"))
 
-	if len(to) > 0 {
-		ret.To = buildUsers(to)
-	} else {
-		ret.To = buildUsers(m.Header.Values("To"))
+	smtpTo := buildUsers(to)
+
+	ret.To = buildUsers(m.Header.Values("To"))
+
+	ret.Bcc = []*User{}
+
+	for _, user := range smtpTo {
+		in := false
+		for _, u := range ret.To {
+			if u.EmailAddress == user.EmailAddress {
+				in = true
+				break
+			}
+		}
+		if !in {
+			ret.Bcc = append(ret.Bcc, user)
+		}
+
 	}
 
 	ret.Cc = buildUsers(m.Header.Values("Cc"))
@@ -191,20 +274,24 @@ func buildUsers(str []string) []*User {
 	return ret
 }
 
-func (e *Email) ForwardBuildBytes(ctx *context.Context, forwardAddress string) []byte {
+func (e *Email) ForwardBuildBytes(ctx *context.Context, sender *models.User) []byte {
 	var b bytes.Buffer
 
 	from := []*mail.Address{{e.From.Name, e.From.EmailAddress}}
-	to := []*mail.Address{
-		{
-			Address: forwardAddress,
-		},
+	to := []*mail.Address{}
+	for _, user := range e.To {
+		to = append(to, &mail.Address{
+			Name:    user.Name,
+			Address: user.EmailAddress,
+		})
 	}
 
+	senderAddress := []*mail.Address{{sender.Name, fmt.Sprintf("%s@%s", sender.Account, config.Instance.Domains[0])}}
 	// Create our mail header
 	var h mail.Header
 	h.SetDate(time.Now())
 	h.SetAddressList("From", from)
+	h.SetAddressList("Sender", senderAddress)
 	h.SetAddressList("To", to)
 	h.SetText("Subject", e.Subject)
 	h.SetMessageID(fmt.Sprintf("%d@%s", e.MessageId, config.Instance.Domain))
@@ -297,6 +384,7 @@ func (e *Email) BuildBytes(ctx *context.Context, dkim bool) []byte {
 	}
 	h.SetMessageID(fmt.Sprintf("%d@%s", e.MessageId, config.Instance.Domain))
 	h.SetAddressList("From", from)
+	h.SetAddressList("Sender", from)
 	h.SetAddressList("To", to)
 	h.SetText("Subject", e.Subject)
 	if len(e.Cc) != 0 {
@@ -322,6 +410,7 @@ func (e *Email) BuildBytes(ctx *context.Context, dkim bool) []byte {
 		log.WithContext(ctx).Fatal(err)
 	}
 	var th mail.InlineHeader
+	th.Header.Set("Content-Transfer-Encoding", "base64")
 	th.SetContentType("text/plain", map[string]string{
 		"charset": "UTF-8",
 	})
@@ -336,6 +425,7 @@ func (e *Email) BuildBytes(ctx *context.Context, dkim bool) []byte {
 	html.SetContentType("text/html", map[string]string{
 		"charset": "UTF-8",
 	})
+	html.Header.Set("Content-Transfer-Encoding", "base64")
 	w, err = tw.CreatePart(html)
 	if err != nil {
 		log.Fatal(err)

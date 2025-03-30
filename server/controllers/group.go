@@ -2,11 +2,9 @@ package controllers
 
 import (
 	"encoding/json"
-	"github.com/Jinnrry/pmail/db"
 	"github.com/Jinnrry/pmail/dto"
 	"github.com/Jinnrry/pmail/dto/response"
 	"github.com/Jinnrry/pmail/i18n"
-	"github.com/Jinnrry/pmail/models"
 	"github.com/Jinnrry/pmail/services/group"
 	"github.com/Jinnrry/pmail/utils/array"
 	"github.com/Jinnrry/pmail/utils/context"
@@ -39,6 +37,10 @@ func GetUserGroup(ctx *context.Context, w http.ResponseWriter, req *http.Request
 					Tag:   dto.SearchTag{Type: 1, Status: 0}.ToString(),
 				},
 				{
+					Label: i18n.GetText(ctx.Lang, "junk"),
+					Tag:   dto.SearchTag{Type: -1, Status: 5}.ToString(),
+				},
+				{
 					Label: i18n.GetText(ctx.Lang, "deleted"),
 					Tag:   dto.SearchTag{Type: -1, Status: 3}.ToString(),
 				},
@@ -67,13 +69,8 @@ func AddGroup(ctx *context.Context, w http.ResponseWriter, req *http.Request) {
 		log.WithContext(ctx).Errorf("%+v", err)
 	}
 
-	var newGroup models.Group = models.Group{
-		Name:     reqData.Name,
-		ParentId: reqData.ParentId,
-		UserId:   ctx.UserID,
-	}
+	newGroup, err := group.CreateGroup(ctx, reqData.Name, reqData.ParentId)
 
-	_, err = db.Instance.Insert(&newGroup)
 	if err != nil {
 		response.NewErrorResponse(response.ServerError, "DBError", err.Error()).FPrint(w)
 		return

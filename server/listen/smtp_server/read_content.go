@@ -9,8 +9,10 @@ import (
 	"github.com/Jinnrry/pmail/dto/parsemail"
 	"github.com/Jinnrry/pmail/hooks"
 	"github.com/Jinnrry/pmail/hooks/framework"
+	"github.com/Jinnrry/pmail/listen/imap_server"
 	"github.com/Jinnrry/pmail/models"
 	"github.com/Jinnrry/pmail/services/rule"
+	"github.com/Jinnrry/pmail/utils/array"
 	"github.com/Jinnrry/pmail/utils/async"
 	"github.com/Jinnrry/pmail/utils/context"
 	"github.com/Jinnrry/pmail/utils/errors"
@@ -37,6 +39,9 @@ func (s *Session) Data(r io.Reader) error {
 		log.WithContext(ctx).Error("邮件内容无法读取", err)
 		return err
 	}
+
+	log.WithContext(ctx).Debugf("%s", string(emailData))
+
 	log.WithContext(ctx).Debugf("开始执行插件ReceiveParseBefore！")
 	for _, hook := range hooks.HookList {
 		if hook == nil {
@@ -81,7 +86,7 @@ func (s *Session) Data(r io.Reader) error {
 		}
 
 		// 转发
-		_, err := saveEmail(ctx, len(emailData), email, s.Ctx.UserID, 1, true, true)
+		_, _, err := saveEmail(ctx, len(emailData), email, s.Ctx.UserID, 1, nil, true, true)
 		if err != nil {
 			log.WithContext(ctx).Errorf("Email Save Error %v", err)
 		}
@@ -155,7 +160,7 @@ func (s *Session) Data(r io.Reader) error {
 			return nil
 		}
 
-		users, _ := saveEmail(ctx, len(emailData), email, 0, 0, SPFStatus, dkimStatus)
+		users, dbEmail, _ := saveEmail(ctx, len(emailData), email, 0, 0, s.To, SPFStatus, dkimStatus)
 
 		if email.MessageId > 0 {
 			log.WithContext(ctx).Debugf("开始执行邮件规则！")
@@ -164,7 +169,7 @@ func (s *Session) Data(r io.Reader) error {
 				rs := rule.GetAllRules(ctx, user.ID)
 				for _, r := range rs {
 					if rule.MatchRule(ctx, r, email) {
-						rule.DoRule(ctx, r, email)
+						rule.DoRule(ctx, r, email, user)
 					}
 				}
 			}
@@ -188,12 +193,17 @@ func (s *Session) Data(r io.Reader) error {
 		as3.Wait()
 		log.WithContext(ctx).Debugf("开始执行插件ReceiveSaveAfter！End")
 
+		// IDLE命令通知
+		for _, user := range users {
+			imap_server.IdleNotice(ctx, user.ID, dbEmail)
+		}
+
 	}
 
 	return nil
 }
 
-func saveEmail(ctx *context.Context, size int, email *parsemail.Email, sendUserID int, emailType int, SPFStatus, dkimStatus bool) ([]*models.User, error) {
+func saveEmail(ctx *context.Context, size int, email *parsemail.Email, sendUserID int, emailType int, reallyTo []string, SPFStatus, dkimStatus bool) ([]*models.User, *models.Email, error) {
 	var dkimV, spfV int8
 	if dkimStatus {
 		dkimV = 1
@@ -205,7 +215,7 @@ func saveEmail(ctx *context.Context, size int, email *parsemail.Email, sendUserI
 	log.WithContext(ctx).Debugf("开始入库！")
 
 	if email == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	modelEmail := models.Email{
@@ -247,10 +257,23 @@ func saveEmail(ctx *context.Context, size int, email *parsemail.Email, sendUserI
 	if emailType == 0 {
 		// 找到收信人id
 		accounts := []string{}
-		for _, user := range append(append(email.To, email.Cc...), email.Bcc...) {
-			account, _ := user.GetDomainAccount()
-			if account != "" {
-				accounts = append(accounts, account)
+		// 优先取smtp协议中的收件人地址
+		if len(reallyTo) > 0 {
+			for _, s := range reallyTo {
+				account := parsemail.BuilderUser(s)
+				if account != nil {
+					acc, domain := account.GetDomainAccount()
+					if array.InArray(domain, config.Instance.Domains) && acc != "" {
+						accounts = append(accounts, acc)
+					}
+				}
+			}
+		} else {
+			for _, user := range append(append(email.To, email.Cc...), email.Bcc...) {
+				account, _ := user.GetDomainAccount()
+				if account != "" {
+					accounts = append(accounts, account)
+				}
 			}
 		}
 
@@ -270,16 +293,16 @@ func saveEmail(ctx *context.Context, size int, email *parsemail.Email, sendUserI
 				}
 			}
 		} else {
-			users = append(users, &models.User{ID: 1})
+			err = db.Instance.Table(&models.User{}).Where("is_admin=1").Find(&users)
 			// 当邮件找不到收件人的时候，邮件全部丢给管理员账号
-			// id = 1的账号直接当成管理员账号处理
-			ue := models.UserEmail{EmailID: modelEmail.Id, UserID: 1, Status: cast.ToInt8(email.Status)}
-			_, err = db.Instance.Insert(&ue)
-			if err != nil {
-				log.WithContext(ctx).Errorf("db insert error:%+v", err.Error())
+			for _, user := range users {
+				ue := models.UserEmail{EmailID: modelEmail.Id, UserID: user.ID, Status: cast.ToInt8(email.Status)}
+				_, err = db.Instance.Insert(&ue)
+				if err != nil {
+					log.WithContext(ctx).Errorf("db insert error:%+v", err.Error())
+				}
 			}
 		}
-
 	} else {
 		ue := models.UserEmail{EmailID: modelEmail.Id, UserID: ctx.UserID}
 		_, err = db.Instance.Insert(&ue)
@@ -288,7 +311,7 @@ func saveEmail(ctx *context.Context, size int, email *parsemail.Email, sendUserI
 		}
 	}
 
-	return users, nil
+	return users, &modelEmail, nil
 }
 
 func json2string(d any) string {

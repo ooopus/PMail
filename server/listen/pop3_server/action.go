@@ -2,10 +2,12 @@ package pop3_server
 
 import (
 	"database/sql"
+	errors2 "errors"
 	"github.com/Jinnrry/gopop"
 	"github.com/Jinnrry/pmail/consts"
 	"github.com/Jinnrry/pmail/db"
 	"github.com/Jinnrry/pmail/dto"
+	"github.com/Jinnrry/pmail/dto/parsemail"
 	"github.com/Jinnrry/pmail/models"
 	"github.com/Jinnrry/pmail/services/del_email"
 	"github.com/Jinnrry/pmail/services/detail"
@@ -67,6 +69,8 @@ func (a action) Capa(session *gopop.Session) ([]string, error) {
 		ret = append(ret, "STLS")
 	}
 
+	log.WithContext(session.Ctx).Debugf("CAPA \n %+v", ret)
+
 	return ret, nil
 }
 
@@ -119,7 +123,7 @@ func (a action) Pass(session *gopop.Session, pwd string) error {
 		return nil
 	}
 
-	return errors.New("password error")
+	return errors2.New("password error")
 }
 
 // Apop APOP登陆命令
@@ -156,7 +160,7 @@ func (a action) Apop(session *gopop.Session, username, digest string) error {
 		return nil
 	}
 
-	return errors.New("password error")
+	return errors2.New("password error")
 
 }
 
@@ -175,6 +179,7 @@ func (a action) Uidl(session *gopop.Session, msg string) ([]gopop.UidlItem, erro
 
 	reqId := cast.ToInt64(msg)
 	if reqId > 0 {
+		log.WithContext(session.Ctx).Debugf("Uidl \n %+v", reqId)
 		return []gopop.UidlItem{
 			{
 				Id:      reqId,
@@ -199,6 +204,8 @@ func (a action) Uidl(session *gopop.Session, msg string) ([]gopop.UidlItem, erro
 			UnionId: cast.ToString(re.Id),
 		})
 	}
+
+	log.WithContext(session.Ctx).Debugf("Uidl \n %+v", ret)
 	return ret, nil
 }
 
@@ -224,17 +231,25 @@ func (a action) List(session *gopop.Session, msg string) ([]gopop.MailInfo, erro
 		if err != nil {
 			return nil, err
 		}
-		res = append(res, listItem{
+		item := listItem{
 			Id:   cast.ToInt64(info.Id),
 			Size: cast.ToInt64(info.Size),
-		})
+		}
+		if item.Size == 0 {
+			item.Size = 9999
+		}
+		res = append(res, item)
 	} else {
 		emailList, _ := list.GetEmailList(session.Ctx.(*context.Context), dto.SearchTag{Type: consts.EmailTypeReceive, Status: -1, GroupId: -1}, "", true, 0, 99999)
 		for _, info := range emailList {
-			res = append(res, listItem{
+			item := listItem{
 				Id:   cast.ToInt64(info.Id),
 				Size: cast.ToInt64(info.Size),
-			})
+			}
+			if item.Size == 0 {
+				item.Size = 9999
+			}
+			res = append(res, item)
 		}
 	}
 	ret := []gopop.MailInfo{}
@@ -244,6 +259,8 @@ func (a action) List(session *gopop.Session, msg string) ([]gopop.MailInfo, erro
 			Size: re.Size,
 		})
 	}
+
+	log.WithContext(session.Ctx).Debugf("List \n %+v", ret)
 	return ret, nil
 }
 
@@ -256,7 +273,8 @@ func (a action) Retr(session *gopop.Session, id int64) (string, int64, error) {
 		return "", 0, errors.New("server error")
 	}
 
-	ret := email.ToTransObj().BuildBytes(session.Ctx.(*context.Context), false)
+	ret := parsemail.NewEmailFromModel(email.Email).BuildBytes(session.Ctx.(*context.Context), false)
+	log.WithContext(session.Ctx).Debugf("Retr \n %+v", string(ret))
 	return string(ret), cast.ToInt64(len(ret)), nil
 
 }
@@ -281,10 +299,10 @@ func (a action) Top(session *gopop.Session, id int64, n int) (string, error) {
 	email, err := detail.GetEmailDetail(session.Ctx.(*context.Context), cast.ToInt(id), false)
 	if err != nil {
 		log.WithContext(session.Ctx.(*context.Context)).Errorf("%+v", err)
-		return "", errors.New("server error")
+		return "", errors2.New("password error")
 	}
 
-	ret := email.ToTransObj().BuildBytes(session.Ctx.(*context.Context), false)
+	ret := parsemail.NewEmailFromModel(email.Email).BuildBytes(session.Ctx.(*context.Context), false)
 	res := strings.Split(string(ret), "\n")
 	headerEndLine := len(res) - 1
 	for i, re := range res {
@@ -297,7 +315,9 @@ func (a action) Top(session *gopop.Session, id int64, n int) (string, error) {
 		return string(ret), nil
 	}
 
-	return array.Join(res[0:headerEndLine+n+1], "\n"), nil
+	lines := array.Join(res[0:headerEndLine+n+1], "\n")
+	log.WithContext(session.Ctx).Debugf("Top \n %+v", lines)
+	return lines, nil
 
 }
 
@@ -308,8 +328,15 @@ func (a action) Noop(session *gopop.Session) error {
 
 func (a action) Quit(session *gopop.Session) error {
 	log.WithContext(session.Ctx).Debugf("POP3 CMD: QUIT ")
+
+	var DelIds []int
+
 	if len(session.DeleteIds) > 0 {
-		del_email.DelEmail(session.Ctx.(*context.Context), session.DeleteIds, false)
+		for _, delId := range session.DeleteIds {
+			DelIds = append(DelIds, cast.ToInt(delId))
+		}
+
+		del_email.DelEmail(session.Ctx.(*context.Context), DelIds, false)
 	}
 
 	return nil
